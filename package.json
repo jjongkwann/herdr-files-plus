@@ -1,0 +1,16 @@
+{
+  "name": "herdr-files-plus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Files panel for the Herdr app with wrapped source, Markdown/HTML previews and Mermaid diagrams",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build/build.mjs",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "beautiful-mermaid": "^1.1.3",
+    "esbuild": "^0.28.2"
+  }
+}
