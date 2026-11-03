@@ -48,7 +48,7 @@ Rendered diagrams are cached as SVG files in `~/.config/herdr-app/data/files-plu
 
 ## What it runs
 
-Nothing new compared with Herdr's Files panel (`sh`/PowerShell to list folders, `git status` for change marks), plus the system opener (`open`, `xdg-open` or `start`) when you press **Open in browser**. It makes no network requests.
+Nothing new compared with Herdr's Files panel (`sh`/PowerShell to list folders, `git status` for change marks), plus the system opener (`open`, `xdg-open` or `explorer.exe`) when you press **Open in browser**. On Windows the folder path reaches PowerShell Base64-encoded, never as script text. It makes no network requests.
 
 ## Development
 
@@ -58,7 +58,7 @@ npm run build      # rebuild mods/files-plus/mermaid.bundle.js
 npm test
 ```
 
-`build/build.mjs` patches two lines of elkjs at build time so it runs in Herdr's QuickJS mod runtime, which has frozen built-in prototypes and no `window`/`global`/`self`. The build fails if an elkjs update moves that code.
+`build/build.mjs` patches elkjs at build time so it runs in Herdr's QuickJS mod runtime, which has frozen built-in prototypes, no `window`/`global`/`self`, and a `setTimeout` that throws. The build fails if an elkjs update moves the patched code, and `test/runtime.test.js` renders a diagram under those limits.
 
 [RECIPE.md](RECIPE.md) is the brief to rebuild the mod from scratch.
 

@@ -9,6 +9,21 @@ test("splits mermaid fences out of markdown", () => {
   assert.equal(splitMermaid(md)[1].text, "flowchart LR\n A --> B");
 });
 
+test("keeps an unclosed mermaid fence as markdown", () => {
+  assert.deepEqual(splitMermaid("a\n```mermaid\nflowchart LR\n A-->B\n").map(p => p.kind), ["markdown"]);
+});
+
+test("splits quickly with many unclosed fences", () => {
+  const t = Date.now();
+  splitMermaid("```mermaid\n".repeat(20000));
+  assert.ok(Date.now() - t < 2000);
+});
+
+test("leaves diagram text that looks like CSS alone", () => {
+  const svg = flattenSvg(renderMermaidSVG("flowchart LR\n A[\"var(--fg) and --x: 1\"] --> B", { bg: "#000000", fg: "#ffffff" }), "Arial");
+  assert.match(svg, /var\(--fg\) and --x: 1/);
+});
+
 test("leaves other code fences alone", () => {
   assert.deepEqual(splitMermaid("```js\nx\n```\n").map(p => p.kind), ["markdown"]);
 });

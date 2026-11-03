@@ -48,7 +48,9 @@ change marks. Additions:
   finds real family names and `sans-serif`, but not `system-ui`; an unmatched family falls
   back to a serif face.
 - `Open in browser` runs `open <file>` on macOS, `xdg-open <file>` on Linux and
-  `cmd /c start "" <file>` on Windows.
+  `explorer.exe <file>` on Windows, the path always as its own argument.
+- On Windows the folder listing passes the path to PowerShell Base64-encoded (UTF-8) and
+  decodes it inside the script, so no folder name becomes PowerShell syntax.
 - Language table: extensions map to the editor's grammar names where they differ (`ts`,
   `tsx`, `jsx`, `mjs`, `cjs` → `js`; `toml`, `yml` → `yaml`; `jsonc`, `json5` → `json`;
   `svelte`, `vue`, `astro`, `htm` → `html`; `svg`, `plist` → `xml`; `h` → `c`; `hpp`, `cc`,
@@ -66,20 +68,30 @@ elkjs and writes SVG strings without a DOM. `build/build.mjs` bundles it with es
 one ES module, `mermaid.bundle.js` (minified, about 1.5 MB), which `mermaid.js` imports with
 a dynamic `import()` on the first diagram so the mod itself stays small.
 
-Two things in elkjs need patching at build time, each applied exactly once or the build
+Four things in elkjs need patching at build time, each applied exactly once or the build
 fails:
 
 1. Built-in prototypes are frozen, so `_.toString=function(){return this.Ib()}` throws
    "'toString' is read-only". It becomes `Object.defineProperty(_,"toString",{...})`.
 2. There is no `window`, `global` or `self`, so GWT's `$wnd` falls back to `globalThis`.
+3. `setTimeout` exists but throws, and assigning it has no effect. GWT's entry watchdog
+   (`Hz=$wnd.setTimeout(Qz,10)`) only resets a counter that stays balanced in synchronous
+   layouts, so it becomes `Hz=-1`; the timer that rethrows uncaught errors is dropped.
+4. elkjs's fake worker hops messages through `setTimeout(fn, 0)`. A module-local
+   `setTimeout` runs them at once, so the layout algorithms are registered before the first
+   layout.
 
-The bundle entry also defines a `setTimeout` that throws for non-zero delays: elkjs only asks
-for zero-delay ones, which beautiful-mermaid drains itself.
+`test/runtime.test.js` renders a diagram in Node with throwing timers, no globals and frozen
+prototypes (`test/fixtures/herdr-like-runtime.js`).
 
 The SVG that beautiful-mermaid writes relies on CSS custom properties and `color-mix()` and
-imports a web font; the native SVG loader supports none of these. `flattenSvg` resolves every
-`var(--…)` and `color-mix(in srgb, …)` to a hex color, drops the declarations and the
-`@import`, and sets one `font-family`.
+imports a web font; the native SVG loader supports none of these. `flattenSvg` reads the custom properties of
+the root element and the `<style>` blocks (each resolved once), resolves every `var(--…)` and
+`color-mix(in srgb, …)` in those blocks and in attribute values to a hex color, drops the
+declarations and the `@import`, and sets one `font-family`. Diagram text is never touched.
+
+Mermaid fences are found by one pass over the lines; an opening fence without a closing
+one stays Markdown.
 
 ## Built from
 

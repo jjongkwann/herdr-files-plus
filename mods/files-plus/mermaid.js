@@ -6,19 +6,29 @@
 let renderer = null;
 const loadRenderer = async () => (renderer ??= (await import("./mermaid.bundle.js")).renderMermaidSVG);
 
-const FENCE = /^(`{3,}|~{3,})[ \t]*mermaid[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/gm;
-
-/** Splits Markdown into [{ kind: "markdown" | "mermaid", text }], in order. */
+/** Splits Markdown into [{ kind: "markdown" | "mermaid", text }], in order. One pass over the lines. */
 export function splitMermaid(markdown) {
-  const parts = [];
-  let last = 0;
-  for (const m of markdown.matchAll(FENCE)) {
-    if (m.index > last) parts.push({ kind: "markdown", text: markdown.slice(last, m.index) });
-    parts.push({ kind: "mermaid", text: m[2] });
-    last = m.index + m[0].length;
+  const lines = markdown.split("\n"), parts = [];
+  // A search that found no closing fence of a character and length rules out every later
+  // fence at least that long, so each line is scanned once.
+  let text = [], i = 0;
+  const unclosed = {};
+  const flush = () => { if (text.join("\n").trim()) parts.push({ kind: "markdown", text: text.join("\n") }); text = []; };
+  while (i < lines.length) {
+    const open = /^(`{3,}|~{3,})[ \t]*mermaid[ \t]*\r?$/.exec(lines[i]);
+    let close = -1;
+    if (open && open[1].length < (unclosed[open[1][0]] ?? Infinity)) {
+      const fence = new RegExp(`^${open[1][0]}{${open[1].length},}[ \\t]*\\r?$`);
+      for (let j = i + 1; j < lines.length; j++) if (fence.test(lines[j])) { close = j; break; }
+      if (close < 0) unclosed[open[1][0]] = open[1].length;
+    }
+    if (close < 0) { text.push(lines[i++]); continue; }
+    flush();
+    parts.push({ kind: "mermaid", text: lines.slice(i + 1, close).join("\n").replace(/\r$/gm, "") });
+    i = close + 1;
   }
-  if (last < markdown.length) parts.push({ kind: "markdown", text: markdown.slice(last) });
-  return parts.filter(p => p.kind === "mermaid" || p.text.trim());
+  flush();
+  return parts;
 }
 
 // ---- CSS variables and color-mix() → concrete colors (the SVG loader understands neither).
@@ -54,48 +64,63 @@ function closing(s, open) {
   return -1;
 }
 
-function evaluate(expr, vars, seen = new Set()) {
+function evaluate(expr, vars, depth = 0) {
   expr = expr.trim();
   const fn = /^(var|color-mix)\(/.exec(expr);
-  if (!fn) return expr;
+  if (!fn || depth > 16) return expr;
   const end = closing(expr, fn[0].length - 1);
   const [first, ...rest] = args(expr.slice(fn[0].length, end));
   if (fn[1] === "var") {
-    if (vars.has(first) && !seen.has(first)) return evaluate(vars.get(first), vars, new Set([...seen, first]));
-    return rest.length ? evaluate(rest.join(","), vars, seen) : "currentColor";
+    if (vars.has(first)) return vars.get(first);
+    return rest.length ? evaluate(rest.join(","), vars, depth + 1) : "currentColor";
   }
   // color-mix(in srgb, A p%, B [q%])
-  const stop = s => { const m = /^(.*?)(?:\s+([\d.]+)%)?$/.exec(s); return [evaluate(m[1], vars, seen), m[2] === undefined ? null : +m[2]]; };
+  const stop = s => { const m = /^(.*?)(?:\s+([\d.]+)%)?$/.exec(s); return [evaluate(m[1], vars, depth + 1), m[2] === undefined ? null : +m[2]]; };
   const [[a, pa], [b, pb]] = rest.map(stop);
-  const ca = hex(a), cb = hex(b);
+  const ca = hex(a ?? ""), cb = hex(b ?? "");
   if (!ca || !cb) return ca ? a : b;
   const p = pa ?? (pb === null ? 50 : 100 - pb);
   return toHex(ca.map((v, i) => (v * p + cb[i] * (100 - p)) / 100));
 }
 
-/** Rewrites an SVG so every color is literal and no remote font is fetched. */
-export function flattenSvg(svg, font) {
-  font = font.split(",").map(f => f.trim()).map(f => /^[\w-]+$/.test(f) ? f : `'${f.replace(/['"]/g, "")}'`).join(", ");
-  const vars = new Map();
-  for (const m of svg.matchAll(/(--[\w-]+)\s*:\s*([^;}"]+)/g)) if (!vars.has(m[1])) vars.set(m[1], m[2].trim());
+// Replaces every var()/color-mix() in a piece of CSS.
+function resolve(css, vars) {
   let out = "", i = 0;
   for (;;) {
-    const at = svg.slice(i).search(/(var|color-mix)\(/);
-    if (at < 0) { out += svg.slice(i); break; }
-    const start = i + at, open = svg.indexOf("(", start), end = closing(svg, open);
-    if (end < 0) { out += svg.slice(i); break; }
-    out += svg.slice(i, start) + evaluate(svg.slice(start, end + 1), vars);
+    const at = css.slice(i).search(/(var|color-mix)\(/);
+    if (at < 0) return out + css.slice(i);
+    const start = i + at, end = closing(css, css.indexOf("(", start));
+    if (end < 0) return out + css.slice(i);
+    out += css.slice(i, start) + evaluate(css.slice(start, end + 1), vars);
     i = end + 1;
   }
-  return out
+}
+
+const STYLE = /<style>([\s\S]*?)<\/style>/g, ROOT = /^<svg\b[^>]*>/, ATTR = /(\s[\w:-]+=")([^"]*)(")/g;
+
+/**
+ * Rewrites the renderer's SVG so every color is literal and no remote font is fetched.
+ * Only its <style> block and attribute values are touched; diagram text is left alone.
+ */
+export function flattenSvg(svg, font) {
+  font = font.split(",").map(f => f.trim()).map(f => /^[\w-]+$/.test(f) ? f : `'${f.replace(/['"]/g, "")}'`).join(", ");
+  // Variables come only from the root element's style and the <style> block, resolved once each, in order.
+  const vars = new Map();
+  const declarations = [ROOT.exec(svg)?.[0] ?? "", ...[...svg.matchAll(STYLE)].map(m => m[1])].join("\n");
+  for (const m of declarations.matchAll(/(--[\w-]+)\s*:\s*([^;}"]+)/g))
+    if (!vars.has(m[1])) vars.set(m[1], evaluate(resolve(m[2].trim(), vars), vars));
+  const css = text => resolve(text, vars)
     .replace(/@import\s+url\([^)]*\)[^;]*;/g, "")
     .replace(/\s*--[\w-]+\s*:\s*[^;}"]+;?/g, "")
-    .replace(/font-family\s*:\s*[^;}"]+/g, `font-family: ${font}`)
-    .replace(/font-family="[^"]*"/g, `font-family="${font.replaceAll('"', "'")}"`);
+    .replace(/font-family\s*:\s*[^;}"]+/g, `font-family: ${font}`);
+  return svg
+    .replace(STYLE, (_, body) => `<style>${css(body)}</style>`)
+    .replace(/<[a-zA-Z][^>]*>/g, tag => tag.replace(ATTR, (_, pre, value, post) =>
+      pre.trim().startsWith("font-family=") ? `${pre}${font.replaceAll('"', "'")}${post}` : pre + css(value) + post));
 }
 
 // Bump when the SVG output changes: the image loader caches by path, so a new look needs a new name.
-const RENDER_VERSION = 2;
+const RENDER_VERSION = 3;
 
 function hash(s) {
   let h = 2166136261;

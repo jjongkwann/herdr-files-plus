@@ -24,13 +24,32 @@ const langOf = path => { const name = path.split("/").pop().toLowerCase(), ext =
 const PER_FOLDER = 500, TOTAL = 5000;
 // Rendered diagrams. Not under mods/: Herdr reloads mods on writes there and skips images from symlinked mod folders.
 const DIAGRAMS = "data/files-plus";
-const OPENER = { macos: ["open", []], linux: ["xdg-open", []], windows: ["cmd", ["/c", "start", ""]] };
+const OPENER = { macos: ["open", []], linux: ["xdg-open", []], windows: ["explorer.exe", []] };
+
+// UTF-8 → Base64, so a folder name never becomes PowerShell syntax.
+function base64(text) {
+  const bytes = [];
+  for (const ch of text) {
+    let c = ch.codePointAt(0);
+    if (c < 0x80) bytes.push(c);
+    else if (c < 0x800) bytes.push(0xc0 | c >> 6, 0x80 | c & 63);
+    else if (c < 0x10000) bytes.push(0xe0 | c >> 12, 0x80 | c >> 6 & 63, 0x80 | c & 63);
+    else bytes.push(0xf0 | c >> 18, 0x80 | c >> 12 & 63, 0x80 | c >> 6 & 63, 0x80 | c & 63);
+  }
+  const A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = bytes[i] << 16 | (bytes[i + 1] ?? 0) << 8 | (bytes[i + 2] ?? 0);
+    out += A[n >> 18] + A[n >> 12 & 63] + (i + 1 < bytes.length ? A[n >> 6 & 63] : "=") + (i + 2 < bytes.length ? A[n & 63] : "=");
+  }
+  return out;
+}
 
 async function directory(path, on) {
   if (!on && window()?.platform === "windows") {
     // Windows PowerShell otherwise uses the console code page; exec decodes UTF-8.
     // Reparse points keep directory attributes even when dangling; check their target.
-    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } '" + path.replaceAll("'", "''") + "'"]);
+    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64(path) + "')))"]);
     if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
     const result = JSON.parse(r.stdout || "[]");
     return Array.isArray(result) ? result : [result];

@@ -11,6 +11,11 @@ const ELK_PATCHES = [
   // No window/global/self here: GWT's $wnd must still reach Math, Error and friends.
   ["    $wnd = self // web worker\n",
    "    $wnd = self // web worker\nif (!$wnd || !$wnd.Math) $wnd = globalThis;\n"],
+  // setTimeout exists but throws. GWT's entry watchdog only resets a depth counter that
+  // stays balanced in synchronous layouts, so it is skipped (Hz = -1 also skips its clearTimeout).
+  ["Hz=$wnd.setTimeout(Qz,10)", "Hz=-1"],
+  // Uncaught errors were rethrown on a timer; layout errors still reach beautiful-mermaid as replies.
+  ["$wnd.setTimeout(function(){throw a},0)", "void a"],
 ];
 const freezeSafeElk = {
   name: "freeze-safe-elk",
@@ -21,6 +26,10 @@ const freezeSafeElk = {
         if (src.split(from).length !== 2) throw new Error(`elkjs changed, patch no longer applies: ${from.trim()}`);
         src = src.replace(from, to);
       }
+      // The runtime's setTimeout throws and can't be replaced. elkjs's remaining calls are its
+      // fake worker's zero-delay message hops; running them at once, through a module-local
+      // binding, registers the layout algorithms before beautiful-mermaid's first layout.
+      src = "var setTimeout = function (fn) { fn(); return 0; };\n" + src;
       return { contents: src, loader: "js" };
     });
   },
