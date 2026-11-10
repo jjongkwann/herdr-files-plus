@@ -6,28 +6,36 @@
 let renderer = null;
 const loadRenderer = async () => (renderer ??= (await import("./mermaid.bundle.js")).renderMermaidSVG);
 
-/** Splits Markdown into [{ kind: "markdown" | "mermaid", text }], in order. One pass over the lines. */
+/**
+ * Splits Markdown into [{ kind: "markdown" | "mermaid", text }], in order. One pass over the lines.
+ * Every code fence is followed, so a Mermaid example inside another fence stays code; a fence
+ * may be indented (in a list item), and one that is never closed runs to the end, as Markdown has it.
+ */
 export function splitMermaid(markdown) {
   const lines = markdown.split("\n"), parts = [];
-  // A search that found no closing fence of a character and length rules out every later
-  // fence at least that long, so each line is scanned once.
-  let text = [], i = 0;
-  const unclosed = {};
-  const flush = () => { if (text.join("\n").trim()) parts.push({ kind: "markdown", text: text.join("\n") }); text = []; };
-  while (i < lines.length) {
-    const open = /^(`{3,}|~{3,})[ \t]*mermaid[ \t]*\r?$/.exec(lines[i]);
-    let close = -1;
-    if (open && open[1].length < (unclosed[open[1][0]] ?? Infinity)) {
-      const fence = new RegExp(`^${open[1][0]}{${open[1].length},}[ \\t]*\\r?$`);
-      for (let j = i + 1; j < lines.length; j++) if (fence.test(lines[j])) { close = j; break; }
-      if (close < 0) unclosed[open[1][0]] = open[1].length;
+  let from = 0;
+  const flush = to => {
+    const text = lines.slice(from, to).join("\n");
+    if (text.trim()) parts.push({ kind: "markdown", text });
+  };
+  for (let i = 0; i < lines.length; i++) {
+    // A backtick fence's info string has no backticks; a tilde fence's may have anything.
+    const open = /^([ \t]*)(?:(`{3,})([^`]*)|(~{3,})(.*))$/.exec(lines[i].replace(/\r$/, ""));
+    if (!open) continue;
+    const marks = open[2] ?? open[4], info = (open[3] ?? open[5]).trim();
+    const fence = new RegExp(`^[ \\t]*${marks[0]}{${marks.length},}[ \\t]*\\r?$`);
+    let close = i + 1;
+    while (close < lines.length && !fence.test(lines[close])) close++;
+    if (close === lines.length) break;
+    if (info === "mermaid") {
+      flush(i);
+      const indent = new RegExp(`^[ \\t]{0,${open[1].length}}`);
+      parts.push({ kind: "mermaid", text: lines.slice(i + 1, close).map(l => l.replace(/\r$/, "").replace(indent, "")).join("\n") });
+      from = close + 1;
     }
-    if (close < 0) { text.push(lines[i++]); continue; }
-    flush();
-    parts.push({ kind: "mermaid", text: lines.slice(i + 1, close).join("\n").replace(/\r$/gm, "") });
-    i = close + 1;
+    i = close;
   }
-  flush();
+  flush(lines.length);
   return parts;
 }
 
@@ -122,10 +130,14 @@ export function flattenSvg(svg, font) {
 // Bump when the SVG output changes: the image loader caches by path, so a new look needs a new name.
 const RENDER_VERSION = 3;
 
+// FNV-1a from two starting values: 64 bits, so two diagrams don't end up with one file name.
 function hash(s) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  return (h >>> 0).toString(36);
+  let a = 2166136261, b = 0x9e3779b9;
+  for (let i = 0; i < s.length; i++) {
+    a = Math.imul(a ^ s.charCodeAt(i), 16777619);
+    b = Math.imul(b ^ s.charCodeAt(i), 16777619);
+  }
+  return (a >>> 0).toString(36) + (b >>> 0).toString(36);
 }
 
 /** Herdr theme → diagram colors. */
@@ -150,5 +162,7 @@ export async function renderToFile(source, { appHome, dir, colors, font = FONT, 
     await writeTextFile(full, svg, null).catch(async e => { if (await readTextFile(full) === null) throw e; });
   }
   const size = name => +(new RegExp(`<svg[^>]*\\s${name}="([\\d.]+)"`).exec(svg)?.[1] ?? 0);
-  return { path, width: size("width"), height: size("height") };
+  const width = size("width"), height = size("height");
+  if (!width || !height) throw new Error("the rendered diagram has no size");
+  return { path, width, height };
 }

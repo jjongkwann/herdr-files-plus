@@ -2,7 +2,7 @@
 
 Herdr's Files panel with wrapped source, rendered Markdown and HTML previews, and Mermaid
 diagrams drawn inside the panel. It replaces the `files` block of a layout and looks and
-behaves like the shipped `files` mod (0.1.12) everywhere this brief doesn't say otherwise.
+behaves like the shipped `files` mod (0.1.14) everywhere this brief doesn't say otherwise.
 
 ![files-plus](preview.png)
 
@@ -36,6 +36,11 @@ change marks. Additions:
 
 - Opening a file reads at most 400,000 characters, as the shipped panel does. Markdown and
   HTML open in Preview; every other file opens in Source.
+- The open file is read again on every refresh of the tree (a change under the folder, and
+  every 10 seconds). When its text changed, the source editor gets the new text with
+  `set_value` and the preview renders again; a diagram whose source didn't change stays on
+  screen. A file that is gone shows `This file is no longer available` and comes back when
+  it does.
 - Diagrams render one after another without blocking the panel. Each one becomes
   `data/files-plus/<hash>.svg` under the app folder, where the hash covers a render version,
   the source, the colors and the font. An existing file is reused, so reopening a document
@@ -43,14 +48,18 @@ change marks. Additions:
   render version.
 - Colors come from `theme()`: `bg` = `background`, `fg` = `foreground`, `line` = `dim`,
   `accent` = `ansi4`, `muted` = `muted`, `border` = `border`; the SVG background is
-  transparent. When the theme's colors change, the open document's diagrams render again.
+  transparent. When the theme's colors change, the open document's diagrams render again, and
+  a run that was still going stops.
 - Font: `'Helvetica Neue', 'Segoe UI', Arial, 'Noto Sans', sans-serif`. The SVG loader
   finds real family names and `sans-serif`, but not `system-ui`; an unmatched family falls
   back to a serif face.
 - `Open in browser` runs `open <file>` on macOS, `xdg-open <file>` on Linux and
-  `explorer.exe <file>` on Windows, the path always as its own argument.
+  `explorer.exe <file>` on Windows (with backslashes only), the path always as its own
+  argument.
 - On Windows the folder listing passes the path to PowerShell Base64-encoded (UTF-8) and
-  decodes it inside the script, so no folder name becomes PowerShell syntax.
+  decodes it inside the script, so no folder name becomes PowerShell syntax. As in the
+  shipped mod, a reparse point without a `LinkType` (a OneDrive folder) is a folder, and a
+  remote machine without `sh` is listed with the same PowerShell script.
 - Language table: extensions map to the editor's grammar names where they differ (`ts`,
   `tsx`, `jsx`, `mjs`, `cjs` → `js`; `toml`, `yml` → `yaml`; `jsonc`, `json5` → `json`;
   `svelte`, `vue`, `astro`, `htm` → `html`; `svg`, `plist` → `xml`; `h` → `c`; `hpp`, `cc`,
@@ -90,16 +99,19 @@ the root element and the `<style>` blocks (each resolved once), resolves every `
 `color-mix(in srgb, …)` in those blocks and in attribute values to a hex color, drops the
 declarations and the `@import`, and sets one `font-family`. Diagram text is never touched.
 
-Mermaid fences are found by one pass over the lines; an opening fence without a closing
-one stays Markdown.
+Mermaid fences are found by one pass over the lines that follows every code fence: a
+Mermaid fence inside another fence stays code, a fence may be indented (in a list item,
+the indentation is taken off the diagram source), and a fence without a closing one runs
+to the end of the document and stays Markdown. A diagram whose SVG has no width or height
+is an error, not an endless `Rendering diagram…`.
 
 ## Built from
 
-- `mods/files-plus/main.js`: the shipped `files` mod 0.1.12, extended. `mod.json`:
-  `{ "place": "none", "cloned_from": { "name": "files", "version": "0.1.12" } }`.
+- `mods/files-plus/main.js`: the shipped `files` mod 0.1.14, extended. `mod.json`:
+  `{ "place": "none", "cloned_from": { "name": "files", "version": "0.1.14" } }`.
 - `mods/files-plus/mermaid.js`: `splitMermaid`, `flattenSvg`, `colorsFor`, `renderToFile`.
 - `mods/files-plus/mermaid.bundle.js`: build output, committed so installing needs no tools.
-- `layouts/main-files-plus.json`: the shipped `main` layout 0.1.12 with `files` → `files-plus`.
+- `layouts/main-files-plus.json`: the shipped `main` layout 0.1.14 with `files` → `files-plus`.
 - `herdr` functions: `exec`, `readTextFile`, `writeTextFile`, `appHome`, `watchFolder`,
-  `spaces`, `panes`, `focused`, `theme`, `settings`, `window`. `gpui-kit`: `View`, `div`,
+  `spaces`, `panes`, `focused`, `theme`, `settings`, `window`. `EditorState.set_value` for reloads. `gpui-kit`: `View`, `div`,
   `svg`, `image`; `gpui-base`: `v_flex`, `h_flex`, `Editor`, `EditorState`, `TextView`.

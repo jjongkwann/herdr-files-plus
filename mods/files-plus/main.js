@@ -46,16 +46,24 @@ function base64(text) {
 }
 
 async function directory(path, on) {
-  if (!on && window()?.platform === "windows") {
+  const windowsDirectory = async () => {
     // Windows PowerShell otherwise uses the console code page; exec decodes UTF-8.
-    // Reparse points keep directory attributes even when dangling; check their target.
-    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64(path) + "')))"]);
+    // Links keep directory attributes even when dangling; check their target.
+    // Other reparse points (OneDrive's folders) have no LinkType and are folders.
+    const r = await exec("powershell", ["-NoProfile", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and (-not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.LinkType -or ($_.Target -and [IO.Directory]::Exists(([IO.Path]::Combine([IO.Path]::GetDirectoryName($_.FullName), $_.Target[0])))))) } }) | ConvertTo-Json -Compress } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + base64(path) + "')))"], { on });
     if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
     const result = JSON.parse(r.stdout || "[]");
     return Array.isArray(result) ? result : [result];
-  }
+  };
+  if (!on && window()?.platform === "windows") return windowsDirectory();
   const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
-  const r = await exec("sh", ["-c", script, "files", path], { on });
+  let r;
+  try { r = await exec("sh", ["-c", script, "files", path], { on }); }
+  catch (e) {
+    // A Windows machine reached through herdr-core has no sh.
+    if (on && String(e).includes("cannot start sh: program not found")) return windowsDirectory();
+    throw e;
+  }
   if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
   const fields = r.stdout.split("\0"), out = [];
   for (let i = 0; i + 1 < fields.length; i += 2) out.push({ name: fields[i + 1], dir: fields[i] === "d" });
@@ -125,6 +133,7 @@ export default class Files extends View {
         }
         if (!this.current(context)) return;
         this.marks = marks; this.error = null; this.watch(cwd, cx);
+        if (this.file && this.raw !== undefined) this.load(cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
@@ -152,40 +161,59 @@ export default class Files extends View {
   }
 
   show(path, cx) {
-    this.code?.release(); this.code = null; this.text = null; this.parts = null; this.file = path; this.fileError = null;
+    this.code?.release(); this.code = null; this.text = null; this.parts = null; this.diagramRun = null; this.raw = undefined;
+    this.file = path; this.fileError = null;
     this.mode = path && PREVIEW[extOf(path)] ? "preview" : "source";
-    if (!path || !cx) return;
-    const context = this.context, root = this.root, on = this.on;
+    if (path && cx) this.load(cx);
+  }
+
+  // Reads the open file. Runs again on every refresh, so a file changed on disk updates in place.
+  load(cx) {
+    const path = this.file, context = this.context, root = this.root, on = this.on;
+    const fail = message => { this.code?.release(); this.code = null; this.text = null; this.parts = null; this.diagramRun = null; this.fileError = message; };
     cx.spawn(async cx => {
       try {
         const text = await readTextFile(`${root}/${path}`, { on });
-        if (this.file !== path || !this.current(context)) return;
-        if (text === null) { this.fileError = "This file is no longer available"; return; }
-        if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        if (this.file !== path || !this.current(context) || text === this.raw) return;
+        this.raw = text;
+        if (text === null) return fail("This file is no longer available");
+        if (text.includes("\0")) return fail("Binary file · no text preview");
         const t = theme(), value = text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
-        this.text = value;
+        const before = this.parts;
+        this.text = value; this.parts = null; this.diagramRun = null; this.fileError = null;
         if (PREVIEW[extOf(path)] === "markdown") {
           const parts = splitMermaid(value);
-          if (parts.some(p => p.kind === "mermaid")) { this.parts = parts; this.renderDiagrams(cx); }
+          if (parts.some(p => p.kind === "mermaid")) {
+            // An unchanged diagram stays on screen while the document renders again.
+            for (const p of parts) if (p.kind === "mermaid") p.diagram = before?.find(o => o.kind === "mermaid" && o.text === p.text)?.diagram;
+            this.parts = parts; this.renderDiagrams(cx);
+          }
         }
-        this.code = EditorState.new({ language: langOf(path), readonly: true, soft_wrap: true, value,
+        if (this.code) this.code.set_value(value);
+        else this.code = EditorState.new({ language: langOf(path), readonly: true, soft_wrap: true, value,
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
-      } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
+      } catch {
+        if (this.file === path && this.current(context)) { this.raw = undefined; fail("Cannot preview this file (binary, too large, or unreadable)"); }
+      }
       finally { cx.notify(); }
     });
   }
 
   renderDiagrams(cx) {
-    const parts = this.parts, colors = colorsFor(theme());
+    // A newer run (the theme changed, the file was read again) makes this one stop.
+    const parts = this.parts, colors = colorsFor(theme()), run = this.diagramRun = {};
     this.diagramColors = JSON.stringify(colors);
     for (const p of parts) if (p.kind === "mermaid") p.diagram = p.diagram ?? { loading: true };
     cx.spawn(async cx => {
       for (const p of parts) {
         if (p.kind !== "mermaid") continue;
-        if (this.parts !== parts) return;
-        try { p.diagram = await renderToFile(p.text, { appHome: appHome(), dir: DIAGRAMS, colors, writeTextFile, readTextFile }); }
-        catch (e) { p.diagram = { error: String(e?.message ?? e) }; }
+        if (this.diagramRun !== run) return;
+        let diagram;
+        try { diagram = await renderToFile(p.text, { appHome: appHome(), dir: DIAGRAMS, colors, writeTextFile, readTextFile }); }
+        catch (e) { diagram = { error: String(e?.message ?? e) }; }
+        if (this.diagramRun !== run) return;
+        p.diagram = diagram;
         cx.notify();
       }
     });
@@ -257,7 +285,11 @@ export default class Files extends View {
     if (kind) out.push(button("files-mode", this.mode === "preview" ? "Source" : "Preview", (_e, cx) => { this.mode = this.mode === "preview" ? "source" : "preview"; cx.notify(); }));
     const opener = OPENER[window()?.platform];
     if (kind === "html" && !this.on && opener)
-      out.push(button("files-browser", "Open in browser", (_e, cx) => { cx.spawn(async () => { await exec(opener[0], [...opener[1], `${this.root}/${this.file}`]); }); }));
+      out.push(button("files-browser", "Open in browser", (_e, cx) => {
+        // explorer.exe takes forward slashes for switches, so the path uses backslashes only.
+        const path = `${this.root}/${this.file}`;
+        cx.spawn(async () => { await exec(opener[0], [...opener[1], window()?.platform === "windows" ? path.replace(/\//g, "\\") : path]); });
+      }));
     return out;
   }
 }
