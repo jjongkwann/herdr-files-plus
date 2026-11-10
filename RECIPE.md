@@ -60,6 +60,10 @@ change marks. Additions:
   decodes it inside the script, so no folder name becomes PowerShell syntax. As in the
   shipped mod, a reparse point without a `LinkType` (a OneDrive folder) is a folder, and a
   remote machine without `sh` is listed with the same PowerShell script.
+- Git change marks are kept by the tree's own paths: `git rev-parse --show-prefix` says where
+  the folder is inside its repository, and each `git status` path under it is looked up
+  without that prefix. No absolute path is compared, so the marks also show on Windows
+  (Git writes `C:/…`, Herdr `C:\…`) and in a folder reached through a link.
 - Language table: extensions map to the editor's grammar names where they differ (`ts`,
   `tsx`, `jsx`, `mjs`, `cjs` → `js`; `toml`, `yml` → `yaml`; `jsonc`, `json5` → `json`;
   `svelte`, `vue`, `astro`, `htm` → `html`; `svg`, `plist` → `xml`; `h` → `c`; `hpp`, `cc`,

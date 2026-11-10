@@ -121,14 +121,17 @@ export default class Files extends View {
           if (!this.current(context)) return;
           await this.loadFolder(path, context);
         }
-        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+        // Where this folder is inside its repository ("" at the top, "sub/" below it). Marks are kept by
+        // the tree's own paths, never absolute ones: Git writes C:/…, Herdr C:\…, and a link's target differs.
+        const prefix = await exec("git", ["rev-parse", "--show-prefix"], { cwd, on }).catch(() => null);
         const marks = {};
-        if (top?.code === 0) {
+        if (prefix?.code === 0) {
+          const inside = prefix.stdout.replace(/\r?\n$/, "");
           // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
           const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
           if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
-            const xy = entry.slice(0, 2);
-            marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+            const xy = entry.slice(0, 2), path = entry.slice(3);
+            if (path.startsWith(inside)) marks[path.slice(inside.length)] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
           }
         }
         if (!this.current(context)) return;
@@ -223,7 +226,7 @@ export default class Files extends View {
     if (out.length >= TOTAL || depth > 40) return out;
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
-      const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[path];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
         .child(entry.dir ? svg(`mods/files-plus/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
